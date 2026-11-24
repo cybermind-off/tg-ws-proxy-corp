@@ -1,0 +1,4 @@
+*.qcow2
+*.part
+*.log
+.DS_Store
