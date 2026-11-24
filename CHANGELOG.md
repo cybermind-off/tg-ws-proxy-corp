@@ -11,6 +11,8 @@ TG WS Proxy Corp (Proxmox VM) — автор Cybermind.
 - Команда `tg-ws-proxyctl auto-update` (её запускает таймер `tg-ws-proxy-update.timer`).
 - Режим обновлений и время следующего запуска в `tg-ws-proxyctl status`.
 - `pve-create-tg-proxy.sh`: параметры `--updates` и `--update-time`.
+- Автоматическое оформление релизов через GitHub Actions: тег, описание из
+  `CHANGELOG.md` и оба скрипта в приложении к релизу.
 
 ### Изменено
 - Еженедельная проверка (`tg-ws-proxy-update-check.timer`) заменена ежедневным

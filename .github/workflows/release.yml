@@ -1,0 +1,65 @@
+# Автоматический релиз: при коммите в main берёт верхнюю версию из CHANGELOG.md
+# и, если релиза с таким тегом ещё нет, создаёт тег vX.Y.Z и релиз со скриптами.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - CHANGELOG.md
+      - '*.sh'
+      - .github/workflows/release.yml
+      - .github/scripts/**
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Проверка скриптов
+        run: |
+          for f in *.sh .github/scripts/*.sh; do bash -n "$f"; done
+          if grep -l $'\r' *.sh; then echo "::error::CRLF в скриптах"; exit 1; fi
+
+      - name: Версия
+        id: ver
+        run: |
+          ver=$(.github/scripts/release-notes.sh --version)
+          [ -n "$ver" ] || { echo "::error::Не найдена версия в CHANGELOG.md"; exit 1; }
+          for f in tg-ws-proxyctl.sh pve-create-tg-proxy.sh; do
+            v=$(grep -m1 -oP '^CORP_VERSION=\K.*' "$f")
+            [ "$v" = "$ver" ] || { echo "::error file=$f::CORP_VERSION=$v, а в CHANGELOG.md $ver"; exit 1; }
+          done
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$ver" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Тег v$ver уже есть — релиз не нужен"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Создать релиз
+        if: steps.ver.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          .github/scripts/release-notes.sh > notes.md
+          cat notes.md
+          gh release create "v$VER" \
+            --target "$GITHUB_SHA" \
+            --title "TG WS Proxy Corp $VER" \
+            --notes-file notes.md \
+            --latest \
+            tg-ws-proxyctl.sh pve-create-tg-proxy.sh

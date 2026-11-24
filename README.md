@@ -540,6 +540,19 @@ rm -f /var/lib/vz/snippets/tg-proxy-<VMID>-vendor.yaml
 
 ---
 
+## Выпуск новой версии (для разработчиков)
+
+Релизы оформляются автоматически (`.github/workflows/release.yml`):
+
+1. Добавьте в начало `CHANGELOG.md` раздел `## [X.Y.Z] — ГГГГ-ММ-ДД` с описанием.
+2. Укажите ту же версию в `CORP_VERSION=` в обоих скриптах.
+3. Отправьте коммит в `main`.
+
+Workflow проверит синтаксис скриптов и совпадение версий, создаст тег `vX.Y.Z`
+и релиз с описанием из `CHANGELOG.md`, приложив `tg-ws-proxyctl.sh` и
+`pve-create-tg-proxy.sh`. Если релиз с такой версией уже есть, ничего не произойдёт.
+Запустить вручную: *Actions → Release → Run workflow*.
+
 ## Лицензия и благодарности
 
 - **tg-ws-proxy** — © [Flowseal](https://github.com/Flowseal), лицензия MIT,
