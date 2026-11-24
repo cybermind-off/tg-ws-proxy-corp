@@ -26,7 +26,7 @@ trap 'echo "[ошибка] команда завершилась с кодом $
 export GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
 
 # ----------------------------- пути -----------------------------------------
-CORP_VERSION=1.0.0
+CORP_VERSION=1.1.0
 APP=tg-ws-proxy
 CTL_PATH=/usr/local/sbin/tg-ws-proxyctl
 INSTALL_DIR=/opt/tg-ws-proxy
@@ -40,8 +40,11 @@ QR_FILE=$CONF_DIR/link-qr.png
 LOG_DIR=/var/log/tg-ws-proxy
 SVC_USER=tgproxy
 UNIT=/etc/systemd/system/$APP.service
-CHK_SVC=/etc/systemd/system/$APP-update-check.service
-CHK_TIMER=/etc/systemd/system/$APP-update-check.timer
+UPD_SVC=/etc/systemd/system/$APP-update.service
+UPD_TIMER=/etc/systemd/system/$APP-update.timer
+# старые имена (1.0.0) — удаляются при переходе
+OLD_CHK_SVC=/etc/systemd/system/$APP-update-check.service
+OLD_CHK_TIMER=/etc/systemd/system/$APP-update-check.timer
 LOCK=/run/tg-ws-proxyctl.lock
 EXIT_UPDATE_AVAILABLE=10
 
@@ -56,7 +59,10 @@ POOL_SIZE=8                    # WS-пул на каждый DC
 DC_IPS="2:149.154.167.220 4:149.154.167.220"
 EXTRA_ARGS=                    # доп. аргументы, напр. "--proxy-protocol"
 FIREWALL=auto                  # auto | ufw | firewalld | none
-UPDATE_TIMER=yes               # еженедельная проверка обновлений
+UPDATE_MODE=                   # auto | check | off  (пусто = auto)
+UPDATE_TIME=04:30              # время ежедневной проверки/обновления
+UPDATE_DELAY_DAYS=0            # ставить релиз не раньше, чем через N дней после выхода
+UPDATE_TIMER=                  # устарело (1.0.0): no = off
 SECRET=
 
 # ----------------------------- утилиты --------------------------------------
@@ -82,6 +88,7 @@ ${c_b}tg-ws-proxyctl${c_0} — корпоративный tg-ws-proxy
   apply          применить изменённые параметры (флаги ниже или правка $CONF)
   update         обновить до последнего релиза (с автооткатом при сбое)
   check          проверить наличие новой версии (код $EXIT_UPDATE_AVAILABLE = есть обновление)
+  auto-update    проверить и, если режим auto, установить (запускается таймером)
   status         состояние службы, версия, ссылка, последняя статистика
   link           показать ссылку для сотрудников (и QR, если есть qrencode)
   rotate-secret  сгенерировать новый секрет (старая ссылка перестанет работать)
@@ -102,7 +109,12 @@ ${c_b}tg-ws-proxyctl${c_0} — корпоративный tg-ws-proxy
   --firewall MODE      auto | ufw | firewalld | none
                        (ufw: установить и включить ufw, если его нет;
                         SSH 22/tcp остаётся открытым)
-  --no-timer           не ставить еженедельную проверку обновлений
+  --updates MODE       auto  — ежедневно проверять и устанавливать (по умолч.)
+                       check — ежедневно только проверять и писать в журнал
+                       off   — не проверять
+  --update-time HH:MM  время ежедневного запуска (по умолч. 04:30)
+  --update-delay N     ставить релиз не раньше, чем через N дней после выхода (по умолч. 0)
+  --no-timer           то же, что --updates off
 
 Файлы:
   конфиг   $CONF
@@ -135,7 +147,9 @@ POOL_SIZE="$POOL_SIZE"
 DC_IPS="$DC_IPS"
 EXTRA_ARGS="$EXTRA_ARGS"
 FIREWALL="$FIREWALL"
-UPDATE_TIMER="$UPDATE_TIMER"
+UPDATE_MODE="$UPDATE_MODE"
+UPDATE_TIME="$UPDATE_TIME"
+UPDATE_DELAY_DAYS="$UPDATE_DELAY_DAYS"
 SECRET="$SECRET"
 EOF
   chmod 600 "$tmp"
@@ -156,7 +170,11 @@ parse_args() {
       --repo)        REPO_URL=${2:?}; shift 2 ;;
       --secret)      SECRET=${2:?}; shift 2 ;;
       --firewall)    FIREWALL=${2:?}; shift 2 ;;
-      --no-timer)    UPDATE_TIMER=no; shift ;;
+      --updates)     UPDATE_MODE=${2:?}; shift 2 ;;
+      --update-time) UPDATE_TIME=${2:?}; shift 2 ;;
+      --update-delay) UPDATE_DELAY_DAYS=${2:?}; shift 2 ;;
+      --auto-update) UPDATE_MODE=auto; shift ;;
+      --no-timer)    UPDATE_MODE=off; shift ;;
       --purge)       PURGE=yes; shift ;;
       -h|--help)     usage; exit 0 ;;
       *) die "неизвестный параметр: $1 (см. --help)" ;;
@@ -166,7 +184,17 @@ parse_args() {
   ALLOW_NETS=$(echo $ALLOW_NETS)   # нормализация пробелов
 }
 
+normalize_update_mode() {
+  if [[ -z $UPDATE_MODE ]]; then
+    if [[ $UPDATE_TIMER == no ]]; then UPDATE_MODE=off; else UPDATE_MODE=auto; fi
+  fi
+}
+
 validate() {
+  normalize_update_mode
+  case $UPDATE_MODE in auto|check|off) ;; *) die "--updates: auto | check | off" ;; esac
+  [[ $UPDATE_TIME =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "--update-time в формате ЧЧ:ММ, например 04:30"
+  [[ $UPDATE_DELAY_DAYS =~ ^[0-9]+$ ]] || die "--update-delay: число дней"
   local bad='["$`\\]'
   local v
   for v in "$REPO_URL" "$VERSION" "$PUBLIC_HOST" "$LISTEN_ADDR" "$ALLOW_NETS" \
@@ -342,32 +370,52 @@ EOF
 }
 
 write_timer() {
-  if [[ $UPDATE_TIMER != yes ]]; then
+  # переход с 1.0.0: еженедельная проверка -> ежедневный таймер
+  if [[ -f $OLD_CHK_TIMER || -f $OLD_CHK_SVC ]]; then
     systemctl disable --now "$APP-update-check.timer" >/dev/null 2>&1 || true
-    rm -f "$CHK_SVC" "$CHK_TIMER"
-    return
+    rm -f "$OLD_CHK_SVC" "$OLD_CHK_TIMER"
   fi
-  cat >"$CHK_SVC" <<EOF
+  if [[ $UPDATE_MODE == off ]]; then
+    systemctl disable --now "$APP-update.timer" >/dev/null 2>&1 || true
+    rm -f "$UPD_SVC" "$UPD_TIMER"
+    return 0
+  fi
+  cat >"$UPD_SVC" <<EOF
+# Сгенерировано tg-ws-proxyctl. Режим: $UPDATE_MODE
 [Unit]
-Description=Check for tg-ws-proxy updates
+Description=tg-ws-proxy update ($UPDATE_MODE)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=$CTL_PATH check
+ExecStart=$CTL_PATH auto-update
 SuccessExitStatus=$EXIT_UPDATE_AVAILABLE
+TimeoutStartSec=30min
 EOF
-  cat >"$CHK_TIMER" <<EOF
+  cat >"$UPD_TIMER" <<EOF
+# Сгенерировано tg-ws-proxyctl
 [Unit]
-Description=Weekly tg-ws-proxy update check
+Description=Daily tg-ws-proxy update ($UPDATE_MODE) at $UPDATE_TIME
 
 [Timer]
-OnCalendar=Mon 09:00
-RandomizedDelaySec=30m
+OnCalendar=*-*-* $UPDATE_TIME:00
+RandomizedDelaySec=15m
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 EOF
+}
+
+enable_timer() {
+  systemctl daemon-reload
+  if [[ $UPDATE_MODE != off ]]; then
+    systemctl enable --now --quiet "$APP-update.timer"
+    log "Обновления: $UPDATE_MODE, ежедневно в $UPDATE_TIME"
+  else
+    log "Обновления: автоматическая проверка выключена"
+  fi
 }
 
 install_ctl() {
@@ -542,7 +590,7 @@ cmd_install() {
   check_outbound
 
   restart_and_verify || die "служба не запустилась (лог выше)"
-  [[ $UPDATE_TIMER == yes ]] && systemctl enable --now --quiet "$APP-update-check.timer"
+  enable_timer
 
   log "Готово. Версия: $(current_version)"
   show_link
@@ -560,7 +608,7 @@ cmd_apply() {
   write_timer
   setup_firewall
   restart_and_verify || die "служба не запустилась после применения настроек"
-  if [[ $UPDATE_TIMER == yes ]]; then systemctl enable --now --quiet "$APP-update-check.timer"; fi
+  enable_timer
   show_link
 }
 
@@ -606,6 +654,50 @@ cmd_update() {
   fi
 }
 
+cmd_auto_update() {
+  need_root
+  [[ -f $CONF ]] || die "не установлено"
+  load_config
+  normalize_update_mode
+  local self rc=0 latest age_days
+  self=$(readlink -f "${BASH_SOURCE[0]}")
+
+  if [[ $UPDATE_MODE == off ]]; then
+    echo "Автоматические обновления выключены (--updates off)"; return 0
+  fi
+
+  # проверка — отдельным процессом, чтобы ошибки внутри не терялись
+  set +e; bash "$self" check; rc=$?; set -e
+  if [[ $rc -eq 0 ]]; then return 0; fi
+  if [[ $rc -ne $EXIT_UPDATE_AVAILABLE ]]; then
+    logger -t "$APP" "ошибка проверки обновлений (код $rc)" 2>/dev/null || true
+    return "$rc"
+  fi
+  if [[ $UPDATE_MODE == check ]]; then return $EXIT_UPDATE_AVAILABLE; fi
+
+  if [[ $VERSION != latest ]]; then
+    echo "Версия закреплена ($VERSION) — автоустановка пропущена"; return 0
+  fi
+
+  latest=$(latest_version)
+  if (( UPDATE_DELAY_DAYS > 0 )); then
+    age_days=$(( ( $(date +%s) - $(git_src log -1 --format=%ct "$latest") ) / 86400 ))
+    if (( age_days < UPDATE_DELAY_DAYS )); then
+      echo "Релиз $latest вышел $age_days дн. назад — установка отложена (--update-delay $UPDATE_DELAY_DAYS)"
+      return 0
+    fi
+  fi
+
+  log "Автообновление до $latest"
+  set +e; bash "$self" update; rc=$?; set -e
+  if [[ $rc -eq 0 ]]; then
+    logger -t "$APP" "tg-ws-proxy автоматически обновлён до $latest" 2>/dev/null || true
+  else
+    logger -p user.err -t "$APP" "автообновление до $latest не удалось (код $rc), выполнен откат" 2>/dev/null || true
+  fi
+  return "$rc"
+}
+
 cmd_status() {
   [[ -f $CONF ]] || die "не установлено"
   need_root
@@ -613,6 +705,14 @@ cmd_status() {
   echo "${c_b}Версия:${c_0}   $(current_version 2>/dev/null || echo '?')"
   echo "${c_b}Адрес:${c_0}    $LISTEN_ADDR:$PORT   (для клиентов: ${PUBLIC_HOST}:$PORT)"
   echo "${c_b}Доступ:${c_0}   ${ALLOW_NETS:-не ограничен локальным файрволом}"
+  normalize_update_mode
+  local next
+  next=$(systemctl show "$APP-update.timer" -p NextElapseUSecRealtime --value 2>/dev/null || true)
+  if [[ $UPDATE_MODE == off ]]; then
+    echo "${c_b}Обновл.:${c_0}  выключены"
+  else
+    echo "${c_b}Обновл.:${c_0}  $UPDATE_MODE, ежедневно в $UPDATE_TIME${next:+ (следующий запуск: $next)}"
+  fi
   echo
   systemctl --no-pager status "$APP" | head -n 5 || true
   echo
@@ -656,8 +756,8 @@ cmd_uninstall() {
   parse_args "$@"
   load_config
   log "Остановка и удаление службы"
-  systemctl disable --now "$APP" "$APP-update-check.timer" >/dev/null 2>&1 || true
-  rm -f "$UNIT" "$CHK_SVC" "$CHK_TIMER"
+  systemctl disable --now "$APP" "$APP-update.timer" "$APP-update-check.timer" >/dev/null 2>&1 || true
+  rm -f "$UNIT" "$UPD_SVC" "$UPD_TIMER" "$OLD_CHK_SVC" "$OLD_CHK_TIMER"
   systemctl daemon-reload
   remove_firewall
   rm -rf "$INSTALL_DIR"
@@ -680,6 +780,7 @@ case $cmd in
   apply)          cmd_apply "$@" ;;
   update)         cmd_update "$@" ;;
   check)          cmd_check || exit $? ;;
+  auto-update)    cmd_auto_update || exit $? ;;
   status)         cmd_status ;;
   link)           cmd_link ;;
   rotate-secret)  cmd_rotate_secret ;;

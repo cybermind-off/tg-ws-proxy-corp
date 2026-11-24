@@ -1,6 +1,6 @@
 # TG WS Proxy Corp (Proxmox VM)
 
-**Автор:** Cybermind · **Лицензия:** MIT · **Версия:** 1.0.0
+**Автор:** Cybermind · **Лицензия:** MIT · **Версия:** 1.1.0
 
 Развёртывание **единого корпоративного Telegram-прокси** на базе
 [**tg-ws-proxy**](https://github.com/Flowseal/tg-ws-proxy) (автор — [Flowseal](https://github.com/Flowseal))
@@ -114,7 +114,7 @@ pvesm set local --content iso,vztmpl,backup,snippets
 
 ```bash
 cd /root
-git clone https://github.com/YOUR_ACCOUNT/tg-ws-proxy-corp.git
+git clone https://github.com/cybermind-off/tg-ws-proxy-corp.git
 cd tg-ws-proxy-corp
 chmod +x *.sh
 ```
@@ -229,6 +229,8 @@ sudo -E bash tg-ws-proxyctl.sh install --repo https://git.corp.local/mirror/tg-w
 | `--pool-size N` | `4` | WebSocket-пул на каждый DC |
 | `--proxyctl FILE` | `tg-ws-proxyctl.sh` рядом | Путь к установщику |
 | `--no-install` | — | Создать VM без установки прокси |
+| `--updates MODE` | `auto` | Обновления tg-ws-proxy: `auto` — ежедневно ставить, `check` — только проверять, `off` — выключить |
+| `--update-time HH:MM` | `04:30` | Время ежедневного обновления |
 | `--snippet-storage ID` | автоопределение | Хранилище snippets |
 
 **Прочее**
@@ -253,6 +255,7 @@ sudo -E bash tg-ws-proxyctl.sh install --repo https://git.corp.local/mirror/tg-w
 | `apply` | Применить новые параметры (флаги ниже или правка конфига) |
 | `update` | Обновить tg-ws-proxy до последнего релиза, с автооткатом при сбое |
 | `check` | Проверить наличие новой версии (код выхода `10` — есть обновление) |
+| `auto-update` | Проверить и, в режиме `auto`, установить (это запускает ежедневный таймер) |
 | `status` | Состояние службы, версия, ссылка, последние записи лога |
 | `link` | Показать ссылку для сотрудников и QR-код |
 | `rotate-secret` | Сгенерировать новый секрет (старая ссылка перестанет работать) |
@@ -274,7 +277,10 @@ sudo -E bash tg-ws-proxyctl.sh install --repo https://git.corp.local/mirror/tg-w
 | `--version TAG` | `latest` | Версия tg-ws-proxy (тег релиза) |
 | `--repo URL` | репозиторий Flowseal | Git-репозиторий (можно внутреннее зеркало) |
 | `--secret HEX32` | генерируется | Задать секрет вручную (32 hex-символа) |
-| `--no-timer` | — | Не ставить еженедельную проверку обновлений |
+| `--updates MODE` | `auto` | `auto` — ежедневно проверять и ставить; `check` — только проверять; `off` — выключить |
+| `--update-time HH:MM` | `04:30` | Время ежедневного запуска |
+| `--update-delay N` | `0` | Ставить релиз не раньше чем через N дней после выхода |
+| `--no-timer` | — | То же, что `--updates off` |
 
 Примеры:
 
@@ -334,6 +340,7 @@ qm guest exec <VMID> --timeout 60 -- tg-ws-proxyctl status
 | `/opt/tg-ws-proxy/venv` | Виртуальное окружение Python |
 | `/var/log/tg-ws-proxy/proxy.log` | Лог прокси (ротация: 5 файлов по 20 МБ) |
 | `/etc/systemd/system/tg-ws-proxy.service` | Служба (генерируется, вручную не править) |
+| `/etc/systemd/system/tg-ws-proxy-update.timer` | Ежедневный таймер обновлений |
 | `/usr/local/sbin/tg-ws-proxyctl` | Утилита управления |
 | `/var/log/tg-ws-proxy-install.log` | Лог автоустановки (VM из Proxmox) |
 
@@ -344,19 +351,51 @@ systemd (read-only файловая система, без повышения п
 
 ## Обновление
 
-### tg-ws-proxy
+### tg-ws-proxy: автоматически
+
+По умолчанию прокси **обновляется сам**: каждый день в **04:30** (± до 15 минут)
+таймер проверяет релизы оригинального проекта и, если вышла новая версия,
+устанавливает её. Если после обновления служба не поднялась, выполняется
+автоматический откат на предыдущую версию. Секрет и ссылка не меняются.
+
+При перезапуске текущие соединения обрываются, клиенты переподключаются за
+несколько секунд, поэтому время по умолчанию — ночное.
+
+Режим, время и задержка настраиваются:
+
+```bash
+sudo tg-ws-proxyctl apply --updates auto                 # ежедневно ставить (по умолчанию)
+sudo tg-ws-proxyctl apply --updates check                # только проверять и писать в журнал
+sudo tg-ws-proxyctl apply --updates off                  # не проверять
+sudo tg-ws-proxyctl apply --update-time 03:00            # другое время
+sudo tg-ws-proxyctl apply --update-delay 2               # ставить релиз не раньше чем через 2 дня после выхода
+```
+
+`--update-delay` защищает от неудачных свежих релизов: если в новой версии
+найдут ошибку, у автора будет время выпустить исправление до того, как
+обновление дойдёт до вас.
+
+Текущий режим и время следующего запуска показывает `sudo tg-ws-proxyctl status`.
+Журнал обновлений:
+
+```bash
+journalctl -u tg-ws-proxy-update -n 30          # что делал таймер
+journalctl -t tg-ws-proxy -n 20                 # итоги: обновлено / откат / есть новая версия
+systemctl list-timers tg-ws-proxy-update.timer  # когда следующий запуск
+```
+
+Запустить автообновление вручную, не дожидаясь таймера:
+
+```bash
+sudo systemctl start tg-ws-proxy-update.service
+```
+
+### tg-ws-proxy: вручную
 
 ```bash
 sudo tg-ws-proxyctl check     # есть ли новая версия + ссылка на список изменений
-sudo tg-ws-proxyctl update    # обновить
+sudo tg-ws-proxyctl update    # обновить сейчас
 ```
-
-`update` скачивает новый релиз, обновляет зависимости, перезапускает службу и
-проверяет, что порт снова слушается. Если служба не поднялась — автоматически
-откатывается на предыдущую версию. Секрет и ссылка не меняются.
-
-При перезапуске текущие соединения обрываются, клиенты переподключатся за
-несколько секунд — обновляйте в нерабочее время.
 
 С ноды Proxmox:
 
@@ -364,18 +403,12 @@ sudo tg-ws-proxyctl update    # обновить
 qm guest exec <VMID> --timeout 300 -- tg-ws-proxyctl update
 ```
 
-Конкретная версия или откат:
+**Закрепить версию** (автообновление перестанет её менять) и снять закрепление:
 
 ```bash
 git -C /opt/tg-ws-proxy/src tag --sort=-v:refname | head   # список версий
-sudo tg-ws-proxyctl update --version v1.12.0
-```
-
-**Уведомления.** Таймер раз в неделю (понедельник, 9:00) проверяет обновления и
-пишет результат в журнал — сам ничего не устанавливает:
-
-```bash
-journalctl -u tg-ws-proxy-update-check -n 20
+sudo tg-ws-proxyctl apply --version v1.12.0 && sudo tg-ws-proxyctl update
+sudo tg-ws-proxyctl apply --version latest  && sudo tg-ws-proxyctl update
 ```
 
 Также можно подписаться на релизы оригинального проекта на GitHub:
@@ -405,6 +438,10 @@ ssh admin@<IP_VM> 'sudo bash /tmp/tg-ws-proxyctl.sh install'
 - **Доступ к прокси защищён только секретом.** Логинов нет, поэтому обязательно
   ограничьте порт 1443 подсетями офиса и VPN: `--allow` + `--firewall ufw`
   или правилами на сетевом оборудовании.
+- **Автообновление** ставит релизы оригинального проекта без ручной проверки.
+  Если нужен контроль над тем, что попадает на сервер, используйте
+  `--updates check` (обновлять вручную после просмотра изменений) или
+  `--update-delay N`.
 - **Секрет утёк** — `sudo tg-ws-proxyctl rotate-secret` и разошлите новую ссылку.
 - Прокси не расшифровывает переписку: трафик Telegram остаётся зашифрованным.
 - Секрет передаётся процессу в аргументах командной строки, поэтому виден

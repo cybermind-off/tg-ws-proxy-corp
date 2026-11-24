@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # ------------------------------ параметры -----------------------------------
-CORP_VERSION=1.0.0
+CORP_VERSION=1.1.0
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VMID=
 NAME=tg-proxy
@@ -49,6 +49,8 @@ TIMEZONE=Europe/Moscow
 SNIPPET_STORAGE=auto
 PROXYCTL=auto                  # auto = tg-ws-proxyctl.sh рядом со скриптом
 FIREWALL=
+UPDATES=
+UPDATE_TIME=
 PUBLIC_HOST=
 ALLOW=
 POOL_SIZE=4
@@ -98,6 +100,9 @@ VM:
   --pool-size N          WS-пул на DC (по умолч. $POOL_SIZE)
   --firewall MODE        файрвол в VM: auto | ufw | none (ufw — включить ufw,
                          открыть 1443 только для --allow, SSH оставить открытым)
+  --updates MODE         обновления tg-ws-proxy: auto (ежедневно ставить, по умолч.)
+                         | check (только проверять) | off
+  --update-time HH:MM    время ежедневного обновления (по умолч. 04:30)
   --snippet-storage ID   хранилище snippets (по умолч. найти автоматически)
 
 Прочее:
@@ -132,6 +137,8 @@ while [[ $# -gt 0 ]]; do
     --proxyctl) PROXYCTL=${2:?}; shift 2 ;;
     --no-install) PROXYCTL=; shift ;;
     --firewall) FIREWALL=${2:?}; shift 2 ;;
+    --updates) UPDATES=${2:?}; shift 2 ;;
+    --update-time) UPDATE_TIME=${2:?}; shift 2 ;;
     --version) echo "pve-create-tg-proxy.sh (TG WS Proxy Corp by Cybermind) $CORP_VERSION"; exit 0 ;;
     --public-host) PUBLIC_HOST=${2:?}; shift 2 ;;
     --allow) ALLOW=${2:?}; shift 2 ;;
@@ -185,6 +192,8 @@ else
   VMID=$(pvesh get /cluster/nextid)
 fi
 
+case $UPDATES in ''|auto|check|off) ;; *) die "--updates: auto | check | off" ;; esac
+[[ -z $UPDATE_TIME || $UPDATE_TIME =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "--update-time в формате ЧЧ:ММ"
 case $FIREWALL in ''|auto|ufw|none) ;; *) die "--firewall: auto | ufw | none" ;; esac
 if [[ $PROXYCTL == auto ]]; then
   PROXYCTL=$SCRIPT_DIR/tg-ws-proxyctl.sh
@@ -255,6 +264,8 @@ write_vendor_data() {
     [[ -n $PUBLIC_HOST ]] && install_cmd+=" --public-host $PUBLIC_HOST"
     [[ -n $ALLOW ]] && install_cmd+=" --allow ${ALLOW// /,}"
     [[ -n $FIREWALL ]] && install_cmd+=" --firewall $FIREWALL"
+    [[ -n $UPDATES ]] && install_cmd+=" --updates $UPDATES"
+    [[ -n $UPDATE_TIME ]] && install_cmd+=" --update-time $UPDATE_TIME"
     install_cmd+=" > /var/log/tg-ws-proxy-install.log 2>&1"
   fi
   {
