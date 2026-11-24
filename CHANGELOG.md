@@ -2,6 +2,13 @@
 
 TG WS Proxy Corp (Proxmox VM) — автор Cybermind.
 
+## [Unreleased]
+
+### Исправлено
+- `pve-create-tg-proxy.sh`: VM создаётся с устройством balloon (без `--balloon 0`),
+  чтобы Proxmox показывал реальный расход памяти гостя, а не >100% вместе с кешем.
+  Для уже созданных VM: `qm set <VMID> --delete balloon && qm reboot <VMID>`.
+
 ## [1.2.0] — 2026-11-24
 
 ### Добавлено

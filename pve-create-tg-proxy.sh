@@ -314,7 +314,7 @@ qm create "$VMID" \
   --description "tg-ws-proxy (MTProto → WebSocket) для офиса и VPN. Создано pve-create-tg-proxy.sh" \
   --tags tg-proxy \
   --ostype l26 \
-  --cores "$CORES" --memory "$MEMORY" --balloon 0 \
+  --cores "$CORES" --memory "$MEMORY" \
   --scsihw virtio-scsi-single \
   --net0 "$net" \
   --agent enabled=1 \
