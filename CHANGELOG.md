@@ -2,6 +2,26 @@
 
 TG WS Proxy Corp (Proxmox VM) — автор Cybermind.
 
+## [1.2.0] — 2026-11-24
+
+### Добавлено
+- Самообновление `tg-ws-proxyctl`: в режиме `--updates auto` ночной таймер сначала
+  проверяет последний релиз `cybermind-off/tg-ws-proxy-corp`, ставит новую версию
+  скрипта, применяет настройки и затем обновляет tg-ws-proxy уже новой версией.
+- Проверка SHA256 скачанного скрипта, защита от понижения версии, откат на
+  предыдущую версию скрипта, если новая не применилась.
+- Команда `tg-ws-proxyctl self-update [--check]`, параметры `--self-update yes|no`
+  и `--self-update-repo OWNER/REPO`.
+- В релизы добавлен файл `SHA256SUMS`.
+
+### Переход с 1.0.0 / 1.1.0
+Один раз обновите скрипт вручную (старые версии не умеют самообновляться):
+```bash
+curl -fsSL https://github.com/cybermind-off/tg-ws-proxy-corp/releases/latest/download/tg-ws-proxyctl.sh -o /tmp/tg-ws-proxyctl.sh
+sudo bash /tmp/tg-ws-proxyctl.sh install
+```
+Дальше новые версии будут приходить сами.
+
 ## [1.1.0] — 2026-11-24
 
 ### Добавлено

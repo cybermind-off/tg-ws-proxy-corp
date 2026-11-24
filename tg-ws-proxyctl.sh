@@ -26,7 +26,7 @@ trap 'echo "[ошибка] команда завершилась с кодом $
 export GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=60
 
 # ----------------------------- пути -----------------------------------------
-CORP_VERSION=1.1.0
+CORP_VERSION=1.2.0
 APP=tg-ws-proxy
 CTL_PATH=/usr/local/sbin/tg-ws-proxyctl
 INSTALL_DIR=/opt/tg-ws-proxy
@@ -63,6 +63,8 @@ UPDATE_MODE=                   # auto | check | off  (пусто = auto)
 UPDATE_TIME=04:30              # время ежедневной проверки/обновления
 UPDATE_DELAY_DAYS=0            # ставить релиз не раньше, чем через N дней после выхода
 UPDATE_TIMER=                  # устарело (1.0.0): no = off
+SELF_UPDATE=yes                # в режиме auto обновлять и сам tg-ws-proxyctl
+SELF_UPDATE_REPO=cybermind-off/tg-ws-proxy-corp   # откуда брать новые версии скрипта
 SECRET=
 
 # ----------------------------- утилиты --------------------------------------
@@ -94,6 +96,8 @@ ${c_b}tg-ws-proxyctl${c_0} — корпоративный tg-ws-proxy
   rotate-secret  сгенерировать новый секрет (старая ссылка перестанет работать)
   uninstall      удалить (конфиг и логи сохраняются; --purge — удалить всё)
   version        версии скрипта и установленного tg-ws-proxy
+  self-update    обновить сам tg-ws-proxyctl из последнего релиза
+                 (--check — только проверить, код $EXIT_UPDATE_AVAILABLE = есть новая версия)
 
 Параметры (install / apply):
   --public-host HOST   имя или IP для ссылки сотрудникам (по умолч. hostname -f)
@@ -115,6 +119,9 @@ ${c_b}tg-ws-proxyctl${c_0} — корпоративный tg-ws-proxy
   --update-time HH:MM  время ежедневного запуска (по умолч. 04:30)
   --update-delay N     ставить релиз не раньше, чем через N дней после выхода (по умолч. 0)
   --no-timer           то же, что --updates off
+  --self-update yes|no в режиме auto обновлять и сам tg-ws-proxyctl (по умолч. yes)
+  --self-update-repo OWNER/REPO  репозиторий с релизами скрипта
+                       (по умолч. cybermind-off/tg-ws-proxy-corp)
 
 Файлы:
   конфиг   $CONF
@@ -150,6 +157,8 @@ FIREWALL="$FIREWALL"
 UPDATE_MODE="$UPDATE_MODE"
 UPDATE_TIME="$UPDATE_TIME"
 UPDATE_DELAY_DAYS="$UPDATE_DELAY_DAYS"
+SELF_UPDATE="$SELF_UPDATE"
+SELF_UPDATE_REPO="$SELF_UPDATE_REPO"
 SECRET="$SECRET"
 EOF
   chmod 600 "$tmp"
@@ -175,6 +184,8 @@ parse_args() {
       --update-delay) UPDATE_DELAY_DAYS=${2:?}; shift 2 ;;
       --auto-update) UPDATE_MODE=auto; shift ;;
       --no-timer)    UPDATE_MODE=off; shift ;;
+      --self-update) SELF_UPDATE=${2:?}; shift 2 ;;
+      --self-update-repo) SELF_UPDATE_REPO=${2:?}; shift 2 ;;
       --purge)       PURGE=yes; shift ;;
       -h|--help)     usage; exit 0 ;;
       *) die "неизвестный параметр: $1 (см. --help)" ;;
@@ -195,6 +206,8 @@ validate() {
   case $UPDATE_MODE in auto|check|off) ;; *) die "--updates: auto | check | off" ;; esac
   [[ $UPDATE_TIME =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "--update-time в формате ЧЧ:ММ, например 04:30"
   [[ $UPDATE_DELAY_DAYS =~ ^[0-9]+$ ]] || die "--update-delay: число дней"
+  [[ $SELF_UPDATE == yes || $SELF_UPDATE == no ]] || die "--self-update: yes | no"
+  [[ $SELF_UPDATE_REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "--self-update-repo в формате OWNER/REPO"
   local bad='["$`\\]'
   local v
   for v in "$REPO_URL" "$VERSION" "$PUBLIC_HOST" "$LISTEN_ADDR" "$ALLOW_NETS" \
@@ -654,6 +667,74 @@ cmd_update() {
   fi
 }
 
+# ------------------------- самообновление скрипта ---------------------------
+SELF_RC_UPDATED=20
+
+download() {   # download URL FILE — через Python (учитывает HTTPS_PROXY)
+  "$(command -v python3)" -I - "$1" "$2" 2>/dev/null <<'PY'
+import sys, urllib.request
+url, out = sys.argv[1], sys.argv[2]
+with urllib.request.urlopen(url, timeout=60) as r, open(out, "wb") as f:
+    f.write(r.read())
+PY
+}
+
+version_gt() {  # version_gt A B — истина, если A > B
+  [[ $1 != "$2" && $(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1) == "$1" ]]
+}
+
+# Возвращает 0 — обновлять нечего, $SELF_RC_UPDATED — установлена новая версия,
+# иначе — ошибка (старая версия остаётся на месте).
+self_update() {
+  local only_check=${1-} base tmp remote bak
+  base=${TGWS_RELEASE_BASE:-https://github.com/$SELF_UPDATE_REPO/releases/latest/download}
+  tmp=$(mktemp -d) || return 1
+  if ! download "$base/tg-ws-proxyctl.sh" "$tmp/tg-ws-proxyctl.sh" || \
+     ! download "$base/SHA256SUMS" "$tmp/SHA256SUMS"; then
+    warn "не удалось скачать последний релиз $SELF_UPDATE_REPO"; rm -rf "$tmp"; return 1
+  fi
+  if ! (cd "$tmp" && grep ' tg-ws-proxyctl\.sh$' SHA256SUMS | sha256sum -c --status 2>/dev/null); then
+    warn "контрольная сумма tg-ws-proxyctl.sh не совпала — обновление отменено"; rm -rf "$tmp"; return 1
+  fi
+  if ! bash -n "$tmp/tg-ws-proxyctl.sh" || ! grep -q '^CORP_VERSION=' "$tmp/tg-ws-proxyctl.sh"; then
+    warn "скачанный tg-ws-proxyctl.sh повреждён — обновление отменено"; rm -rf "$tmp"; return 1
+  fi
+  remote=$(grep -m1 '^CORP_VERSION=' "$tmp/tg-ws-proxyctl.sh" | cut -d= -f2)
+  if ! version_gt "$remote" "$CORP_VERSION"; then
+    echo "tg-ws-proxyctl актуален: $CORP_VERSION (в релизе: $remote)"; rm -rf "$tmp"; return 0
+  fi
+  echo "Доступна новая версия tg-ws-proxyctl: $CORP_VERSION -> $remote"
+  if [[ $only_check == --check ]]; then rm -rf "$tmp"; return $SELF_RC_UPDATED; fi
+
+  bak=$CTL_PATH.prev
+  [[ -f $CTL_PATH ]] && cp -p "$CTL_PATH" "$bak"
+  install -m 755 "$tmp/tg-ws-proxyctl.sh" "$CTL_PATH"
+  rm -rf "$tmp"
+  log "tg-ws-proxyctl обновлён до $remote, применение настроек"
+  if "$CTL_PATH" apply; then
+    logger -t "$APP" "tg-ws-proxyctl автоматически обновлён: $CORP_VERSION -> $remote" 2>/dev/null || true
+    return $SELF_RC_UPDATED
+  fi
+  warn "новая версия tg-ws-proxyctl не применилась — возврат на $CORP_VERSION"
+  logger -p user.err -t "$APP" "обновление tg-ws-proxyctl до $remote не удалось, откат на $CORP_VERSION" 2>/dev/null || true
+  if [[ -f $bak ]]; then install -m 755 "$bak" "$CTL_PATH"; "$CTL_PATH" apply || true; fi
+  return 1
+}
+
+cmd_self_update() {
+  need_root
+  [[ -f $CONF ]] || die "не установлено"
+  load_config
+  [[ ${1-} == --check || -z ${1-} ]] || die "использование: tg-ws-proxyctl self-update [--check]"
+  local rc=0
+  self_update "${1-}" || rc=$?
+  if (( rc == SELF_RC_UPDATED )); then
+    [[ ${1-} == --check ]] && return $EXIT_UPDATE_AVAILABLE
+    return 0
+  fi
+  return "$rc"
+}
+
 cmd_auto_update() {
   need_root
   [[ -f $CONF ]] || die "не установлено"
@@ -664,6 +745,16 @@ cmd_auto_update() {
 
   if [[ $UPDATE_MODE == off ]]; then
     echo "Автоматические обновления выключены (--updates off)"; return 0
+  fi
+
+  # сначала — сам скрипт; после обновления продолжает уже новая версия
+  if [[ $UPDATE_MODE == auto && $SELF_UPDATE == yes && -z ${TGWS_SELF_UPDATED-} ]]; then
+    set +e; self_update; rc=$?; set -e
+    if (( rc == SELF_RC_UPDATED )); then
+      export TGWS_SELF_UPDATED=1
+      exec "$CTL_PATH" auto-update
+    fi
+    rc=0   # ошибка самообновления не мешает обновить tg-ws-proxy
   fi
 
   # проверка — отдельным процессом, чтобы ошибки внутри не терялись
@@ -712,6 +803,11 @@ cmd_status() {
     echo "${c_b}Обновл.:${c_0}  выключены"
   else
     echo "${c_b}Обновл.:${c_0}  $UPDATE_MODE, ежедневно в $UPDATE_TIME${next:+ (следующий запуск: $next)}"
+  fi
+  if [[ $UPDATE_MODE == auto && $SELF_UPDATE == yes ]]; then
+    echo "${c_b}Скрипт:${c_0}   tg-ws-proxyctl $CORP_VERSION, самообновление из $SELF_UPDATE_REPO"
+  else
+    echo "${c_b}Скрипт:${c_0}   tg-ws-proxyctl $CORP_VERSION, самообновление выключено"
   fi
   echo
   systemctl --no-pager status "$APP" | head -n 5 || true
@@ -781,6 +877,7 @@ case $cmd in
   update)         cmd_update "$@" ;;
   check)          cmd_check || exit $? ;;
   auto-update)    cmd_auto_update || exit $? ;;
+  self-update)    cmd_self_update "$@" || exit $? ;;
   status)         cmd_status ;;
   link)           cmd_link ;;
   rotate-secret)  cmd_rotate_secret ;;

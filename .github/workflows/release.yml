@@ -57,9 +57,10 @@ jobs:
         run: |
           .github/scripts/release-notes.sh > notes.md
           cat notes.md
+          sha256sum tg-ws-proxyctl.sh pve-create-tg-proxy.sh > SHA256SUMS
           gh release create "v$VER" \
             --target "$GITHUB_SHA" \
             --title "TG WS Proxy Corp $VER" \
             --notes-file notes.md \
             --latest \
-            tg-ws-proxyctl.sh pve-create-tg-proxy.sh
+            tg-ws-proxyctl.sh pve-create-tg-proxy.sh SHA256SUMS

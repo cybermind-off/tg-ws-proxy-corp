@@ -26,7 +26,7 @@
 set -euo pipefail
 
 # ------------------------------ параметры -----------------------------------
-CORP_VERSION=1.1.0
+CORP_VERSION=1.2.0
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 VMID=
 NAME=tg-proxy

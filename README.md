@@ -1,6 +1,6 @@
 # TG WS Proxy Corp (Proxmox VM)
 
-**Автор:** Cybermind · **Лицензия:** MIT · **Версия:** 1.1.0
+**Автор:** Cybermind · **Лицензия:** MIT · **Версия:** 1.2.0
 
 Развёртывание **единого корпоративного Telegram-прокси** на базе
 [**tg-ws-proxy**](https://github.com/Flowseal/tg-ws-proxy) (автор — [Flowseal](https://github.com/Flowseal))
@@ -260,6 +260,7 @@ sudo -E bash tg-ws-proxyctl.sh install --repo https://git.corp.local/mirror/tg-w
 | `link` | Показать ссылку для сотрудников и QR-код |
 | `rotate-secret` | Сгенерировать новый секрет (старая ссылка перестанет работать) |
 | `version` | Версии скрипта и установленного tg-ws-proxy |
+| `self-update [--check]` | Обновить сам `tg-ws-proxyctl` из последнего релиза (`--check` — только проверить) |
 | `uninstall [--purge]` | Удалить (с `--purge` — вместе с конфигом и логами) |
 
 ### Параметры (для `install` и `apply`)
@@ -281,6 +282,8 @@ sudo -E bash tg-ws-proxyctl.sh install --repo https://git.corp.local/mirror/tg-w
 | `--update-time HH:MM` | `04:30` | Время ежедневного запуска |
 | `--update-delay N` | `0` | Ставить релиз не раньше чем через N дней после выхода |
 | `--no-timer` | — | То же, что `--updates off` |
+| `--self-update yes\|no` | `yes` | В режиме `auto` обновлять и сам `tg-ws-proxyctl` из релизов |
+| `--self-update-repo OWNER/REPO` | `cybermind-off/tg-ws-proxy-corp` | Откуда брать новые версии скрипта |
 
 Примеры:
 
@@ -390,6 +393,33 @@ systemctl list-timers tg-ws-proxy-update.timer  # когда следующий 
 sudo systemctl start tg-ws-proxy-update.service
 ```
 
+### Сам скрипт tg-ws-proxyctl: автоматически
+
+В режиме `--updates auto` ночной таймер **сначала обновляет сам `tg-ws-proxyctl`**
+из последнего релиза этого репозитория, а затем уже новой версией — tg-ws-proxy.
+Так до VM сами доходят и исправления скриптов, и новые возможности.
+
+- скачиваются `tg-ws-proxyctl.sh` и `SHA256SUMS` из
+  `https://github.com/cybermind-off/tg-ws-proxy-corp/releases/latest`;
+- проверяются контрольная сумма и синтаксис, версия должна быть **новее**
+  установленной (понижения не бывает);
+- новая версия применяет настройки (`apply`); если это не удалось — возвращается
+  предыдущая версия скрипта (`/usr/local/sbin/tg-ws-proxyctl.prev`).
+
+```bash
+sudo tg-ws-proxyctl self-update --check      # есть ли новая версия скрипта
+sudo tg-ws-proxyctl self-update              # обновить скрипт сейчас
+sudo tg-ws-proxyctl apply --self-update no   # не обновлять скрипт автоматически
+sudo tg-ws-proxyctl apply --self-update-repo myorg/tg-ws-proxy-corp   # свой форк
+```
+
+Версии 1.0.0 и 1.1.0 самообновляться не умеют — один раз обновите их вручную:
+
+```bash
+curl -fsSL https://github.com/cybermind-off/tg-ws-proxy-corp/releases/latest/download/tg-ws-proxyctl.sh -o /tmp/tg-ws-proxyctl.sh
+sudo bash /tmp/tg-ws-proxyctl.sh install
+```
+
 ### tg-ws-proxy: вручную
 
 ```bash
@@ -415,15 +445,10 @@ sudo tg-ws-proxyctl apply --version latest  && sudo tg-ws-proxyctl update
 *Watch → Custom → Releases* в репозитории
 [Flowseal/tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy).
 
-### Скрипты этого репозитория
+### Скрипты на ноде Proxmox
 
 ```bash
-# на ноде
 cd /root/tg-ws-proxy-corp && git pull
-
-# на VM: скопировать новый установщик и переустановить (настройки сохранятся)
-scp tg-ws-proxyctl.sh admin@<IP_VM>:/tmp/
-ssh admin@<IP_VM> 'sudo bash /tmp/tg-ws-proxyctl.sh install'
 ```
 
 ### Операционная система
@@ -442,6 +467,10 @@ ssh admin@<IP_VM> 'sudo bash /tmp/tg-ws-proxyctl.sh install'
   Если нужен контроль над тем, что попадает на сервер, используйте
   `--updates check` (обновлять вручную после просмотра изменений) или
   `--update-delay N`.
+- **Самообновление скрипта** доверяет релизам репозитория
+  `cybermind-off/tg-ws-proxy-corp`: кто может выпустить в нём релиз, тот может
+  изменить код на ваших VM. Защищайте аккаунт GitHub (2FA) либо отключите
+  самообновление: `--self-update no`.
 - **Секрет утёк** — `sudo tg-ws-proxyctl rotate-secret` и разошлите новую ссылку.
 - Прокси не расшифровывает переписку: трафик Telegram остаётся зашифрованным.
 - Секрет передаётся процессу в аргументах командной строки, поэтому виден
@@ -549,8 +578,9 @@ rm -f /var/lib/vz/snippets/tg-proxy-<VMID>-vendor.yaml
 3. Отправьте коммит в `main`.
 
 Workflow проверит синтаксис скриптов и совпадение версий, создаст тег `vX.Y.Z`
-и релиз с описанием из `CHANGELOG.md`, приложив `tg-ws-proxyctl.sh` и
-`pve-create-tg-proxy.sh`. Если релиз с такой версией уже есть, ничего не произойдёт.
+и релиз с описанием из `CHANGELOG.md`, приложив `tg-ws-proxyctl.sh`,
+`pve-create-tg-proxy.sh` и `SHA256SUMS`. Ночью VM подхватят новую версию
+скрипта сами (самообновление). Если релиз с такой версией уже есть, ничего не произойдёт.
 Запустить вручную: *Actions → Release → Run workflow*.
 
 ## Лицензия и благодарности
